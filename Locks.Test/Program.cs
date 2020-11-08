@@ -14,9 +14,9 @@ namespace Locks.Test
         static void Main(string[] args)
         {
 
-            var tasks = Enumerable.Range(1, 1).Select(p =>
+            var tasks = Enumerable.Range(1, 1000).Select(p =>
             {
-                return Task.Factory.StartNew(async () => await Create());
+                return Task.Run(async () => await Create());
             }).ToArray();
             Task.WaitAll(tasks);
             Console.WriteLine(ids.ToList().Distinct().Count());
@@ -35,7 +35,7 @@ namespace Locks.Test
                 var index = orderId;
                 ids.Enqueue(index);
                 orderId = index + 1;
-                _ = l.Unlock("test");
+                await l.Unlock("test");
             }
             catch (Exception e)
             {

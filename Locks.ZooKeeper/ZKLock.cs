@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using static org.apache.zookeeper.Watcher.Event;
 //using Vostok.ZooKeeper.Client;
 //using Vostok.ZooKeeper.Client.Abstractions;
 //using Vostok.ZooKeeper.Client.Abstractions.Model;
@@ -17,22 +18,27 @@ namespace Locks.ZooKeeper
     public class ZKLock : ILock
     {
         private readonly ZKConfig config;
-        //private readonly ZooKeeperClient zooKeeper;
-        private readonly ZK.ZooKeeper zooKeeper;
-        private readonly DummyWatcher watcher;
+        private static object lockObj = new object();
+        private static ZK.ZooKeeper zooKeeper;
         private readonly List<ACL> acls = ZooDefs.Ids.OPEN_ACL_UNSAFE;
         private string nodePath;
+
         public ZKLock(ZKConfig config)
         {
             this.config = config;
 
-            this.watcher = new DummyWatcher(this.config.Name);
-            this.zooKeeper = new ZK.ZooKeeper(this.config.ConnectionString, this.config.SessionTimeout, this.watcher);
-            //this.zooKeeper.Connect().Wait();
-            while (zooKeeper.getState() == ZK.ZooKeeper.States.CONNECTING)
+            var tcs = new TaskCompletionSource<bool>();
+            lock (lockObj)
             {
-                Thread.Sleep(15);
+                if (zooKeeper == null)
+                {
+                    zooKeeper = new ZK.ZooKeeper(
+                        this.config.ConnectionString,
+                        this.config.SessionTimeout,
+                        new WaitWatcher(string.Empty, tcs, e => e.getState() == KeeperState.SyncConnected));
+                }
             }
+            zooKeeper.Connect().Wait();
             if (zooKeeper.getState() != ZK.ZooKeeper.States.CONNECTED &&
                 zooKeeper.getState() != ZK.ZooKeeper.States.CONNECTEDREADONLY)
             {
@@ -48,7 +54,7 @@ namespace Locks.ZooKeeper
             await this.CreatNodeIfNotExist(node);
             var path = $"{config.LockPath}/${lockNode}/${config.Name}-";
 
-            this.nodePath = await this.zooKeeper.createAsync(
+            this.nodePath = await zooKeeper.createAsync(
                  path,
                  this.config.Name.ToBytes(),
                  this.acls,
@@ -77,26 +83,32 @@ namespace Locks.ZooKeeper
             {
                 throw new Exception("Node Get Error");
             }
-            var cts = new CancellationTokenSource();
-            await this.zooKeeper.getChildrenAsync($"{node}/{targetNode}", new DeleteWatcher(cts));
-            await Task.Delay(Timeout.Infinite, cts.Token);
-
+            var tcs = new TaskCompletionSource<bool>();
+            Console.WriteLine($"{this.config.Name} Wait for {node}/{targetNode}");
+            var waitNode = await zooKeeper.existsAsync(
+                $"{node}/{targetNode}",
+                new WaitWatcher($"{node}/{targetNode}", tcs, e => e.get_Type() == EventType.NodeDeleted || e.getState() == KeeperState.Disconnected));
+            if (waitNode != null)
+            {
+                await Task.WhenAny(Task.Delay(Timeout.Infinite), tcs.Task);
+            }
             Console.WriteLine($"{this.config.Name} Begin Lock");
             return;
         }
 
         public Task Unlock(string lockNode)
         {
-            Console.WriteLine($"{this.config.Name} Release Lock");
-            return this.zooKeeper.deleteAsync($"{config.LockPath}/${lockNode}/{this.nodePath}");
+            var path = $"{this.nodePath}";
+            Console.WriteLine($"Unlock {path}");
+            return zooKeeper.deleteAsync(path);
         }
 
         private async Task CreatNodeIfNotExist(string path)
         {
-            var stat = await this.zooKeeper.existsAsync(path);
+            var stat = await zooKeeper.existsAsync(path);
             if (stat == null)
             {
-                await this.zooKeeper.createAsync(path, path.ToBytes(), this.acls, CreateMode.PERSISTENT);
+                await zooKeeper.createAsync(path, path.ToBytes(), this.acls, CreateMode.PERSISTENT);
             }
         }
     }
